@@ -53,7 +53,10 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
   publish_tf_(false),
   x_(0.0),
   y_(0.0),
-  yaw_(0.0)
+  yaw_(0.0),
+  previous_x_dot_(0.0),
+  previous_y_dot_(0.0),
+  previous_angular_velocity_(0.0)
 {
   // get ROS parameters
   odom_frame_ = declare_parameter("odom_frame", odom_frame_);
@@ -62,10 +65,17 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
 
   speed_to_erpm_gain_ = declare_parameter("speed_to_erpm_gain").get<double>();
   speed_to_erpm_offset_ = declare_parameter("speed_to_erpm_offset").get<double>();
+  speed_deadzone_ = declare_parameter("speed_deadzone").get<double>();
+
+  calculate_position_and_yaw_ = declare_parameter("calculate_position_and_yaw", calculate_position_and_yaw_);
 
   if (use_servo_cmd_) {
-    steering_to_servo_gain_ = declare_parameter("steering_angle_to_servo_gain").get<double>();
-    steering_to_servo_offset_ = declare_parameter("steering_angle_to_servo_offset").get<double>();
+    steering_min_angle_ = declare_parameter("steering_min_angle").get<double>();
+    steering_max_angle_ = declare_parameter("steering_max_angle").get<double>();
+    steering_min_servo_ = declare_parameter("steering_min_servo").get<double>();
+    steering_max_servo_ = declare_parameter("steering_max_servo").get<double>();
+    steering_center_servo_ = declare_parameter("steering_center_servo").get<double>();
+
     wheelbase_ = declare_parameter("wheelbase").get<double>();
   }
 
@@ -91,44 +101,27 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
 
 void VescToOdom::vescStateCallback(const VescStateStamped::SharedPtr state)
 {
-  // check that we have a last servo command if we are depending on it for angular velocity
-  if (use_servo_cmd_ && !last_servo_cmd_) {
-    return;
-  }
+  // Default to 0 servo angle if no command is given
+  double last_servo_cmd_value = use_servo_cmd_ && last_servo_cmd_ ? last_servo_cmd_->data: 0;
 
   // convert to engineering units
-  double current_speed = (-state->state.speed - speed_to_erpm_offset_) / speed_to_erpm_gain_;
-  if (std::fabs(current_speed) < 0.05) {
+  double current_speed = -(-state->state.speed - speed_to_erpm_offset_) / speed_to_erpm_gain_;
+  if (std::fabs(current_speed) < speed_deadzone_) {
     current_speed = 0.0;
   }
   double current_steering_angle(0.0), current_angular_velocity(0.0);
   if (use_servo_cmd_) {
-    current_steering_angle =
-      (last_servo_cmd_->data - steering_to_servo_offset_) / steering_to_servo_gain_;
+    if(last_servo_cmd_value > steering_center_servo_){
+      double coeff = (last_servo_cmd_value - steering_center_servo_) / (steering_max_servo_ - steering_center_servo_);
+      current_steering_angle = steering_max_angle_ * clip(coeff, 0.0, 1.0);
+    }
+    else if(last_servo_cmd_value < steering_center_servo_){
+      double coeff = (last_servo_cmd_value - steering_min_servo_) / (steering_center_servo_ - steering_min_servo_);
+      current_steering_angle = steering_min_angle_ * clip(1 - coeff, 0.0, 1.0);
+    }
+
     current_angular_velocity = current_speed * tan(current_steering_angle) / wheelbase_;
   }
-
-  // use current state as last state if this is our first time here
-  if (!last_state_) {
-    last_state_ = state;
-  }
-
-  // calc elapsed time
-  auto dt = rclcpp::Time(state->header.stamp) - rclcpp::Time(last_state_->header.stamp);
-
-  /** @todo could probably do better propigating odometry, e.g. trapezoidal integration */
-
-  // propigate odometry
-  double x_dot = current_speed * cos(yaw_);
-  double y_dot = current_speed * sin(yaw_);
-  x_ += x_dot * dt.seconds();
-  y_ += y_dot * dt.seconds();
-  if (use_servo_cmd_) {
-    yaw_ += current_angular_velocity * dt.seconds();
-  }
-
-  // save state for next time
-  last_state_ = state;
 
   // publish odometry message
   Odometry odom;
@@ -136,19 +129,65 @@ void VescToOdom::vescStateCallback(const VescStateStamped::SharedPtr state)
   odom.header.stamp = state->header.stamp;
   odom.child_frame_id = base_frame_;
 
-  // Position
-  odom.pose.pose.position.x = x_;
-  odom.pose.pose.position.y = y_;
-  odom.pose.pose.orientation.x = 0.0;
-  odom.pose.pose.orientation.y = 0.0;
-  odom.pose.pose.orientation.z = sin(yaw_ / 2.0);
-  odom.pose.pose.orientation.w = cos(yaw_ / 2.0);
+  if(calculate_position_and_yaw_){
+    // use current state as last state if this is our first time here
+    if (!last_state_) {
+      last_state_ = state;
+    }
 
-  // Position uncertainty
-  /** @todo Think about position uncertainty, perhaps get from parameters? */
-  odom.pose.covariance[0] = 0.2;   ///< x
-  odom.pose.covariance[7] = 0.2;   ///< y
-  odom.pose.covariance[35] = 0.4;  ///< yaw
+    // calc elapsed time
+    auto dt = rclcpp::Time(state->header.stamp) - rclcpp::Time(last_state_->header.stamp);
+
+    /** @todo could probably do better propigating odometry, e.g. trapezoidal integration */
+
+    // propigate odometry
+    double x_dot = current_speed * cos(yaw_);
+    double y_dot = current_speed * sin(yaw_);
+    // x_ += (x_dot + previous_x_dot_) / 2 * dt.seconds();
+    // y_ += (y_dot + previous_y_dot_) / 2 * dt.seconds();
+    x_ += x_dot * dt.seconds();
+    y_ += y_dot * dt.seconds();
+    if (use_servo_cmd_) {
+      // yaw_ += (current_angular_velocity + previous_angular_velocity_) / 2 * dt.seconds();
+      yaw_ += current_angular_velocity * dt.seconds();
+    }
+
+    previous_x_dot_ = x_dot;
+    previous_y_dot_ = y_dot;
+    previous_angular_velocity_ = current_angular_velocity;
+
+    // save state for next time
+    last_state_ = state;
+
+    // Position
+    odom.pose.pose.position.x = x_;
+    odom.pose.pose.position.y = y_;
+    odom.pose.pose.orientation.x = 0.0;
+    odom.pose.pose.orientation.y = 0.0;
+    odom.pose.pose.orientation.z = sin(yaw_ / 2.0);
+    odom.pose.pose.orientation.w = cos(yaw_ / 2.0);
+
+    // Position uncertainty
+    /** @todo Think about position uncertainty, perhaps get from parameters? */
+    odom.pose.covariance[0] = 0.2;   ///< x
+    odom.pose.covariance[7] = 0.2;   ///< y
+    odom.pose.covariance[35] = 0.4;  ///< yaw
+
+    if (publish_tf_) {
+      TransformStamped tf;
+      tf.header.frame_id = odom_frame_;
+      tf.child_frame_id = base_frame_;
+      tf.header.stamp = now();
+      tf.transform.translation.x = x_;
+      tf.transform.translation.y = y_;
+      tf.transform.translation.z = 0.0;
+      tf.transform.rotation = odom.pose.pose.orientation;
+
+      if (rclcpp::ok()) {
+        tf_pub_->sendTransform(tf);
+      }
+    }
+  }
 
   // Velocity ("in the coordinate frame given by the child_frame_id")
   odom.twist.twist.linear.x = current_speed;
@@ -158,21 +197,6 @@ void VescToOdom::vescStateCallback(const VescStateStamped::SharedPtr state)
   // Velocity uncertainty
   /** @todo Think about velocity uncertainty */
 
-  if (publish_tf_) {
-    TransformStamped tf;
-    tf.header.frame_id = odom_frame_;
-    tf.child_frame_id = base_frame_;
-    tf.header.stamp = now();
-    tf.transform.translation.x = x_;
-    tf.transform.translation.y = y_;
-    tf.transform.translation.z = 0.0;
-    tf.transform.rotation = odom.pose.pose.orientation;
-
-    if (rclcpp::ok()) {
-      tf_pub_->sendTransform(tf);
-    }
-  }
-
   if (rclcpp::ok()) {
     odom_pub_->publish(odom);
   }
@@ -181,6 +205,10 @@ void VescToOdom::vescStateCallback(const VescStateStamped::SharedPtr state)
 void VescToOdom::servoCmdCallback(const Float64::SharedPtr servo)
 {
   last_servo_cmd_ = servo;
+}
+
+double VescToOdom::clip(double n, double lower, double upper) {
+  return std::max(lower, std::min(n, upper));
 }
 
 }  // namespace vesc_ackermann

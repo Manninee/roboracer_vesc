@@ -44,14 +44,25 @@ using ackermann_msgs::msg::AckermannDriveStamped;
 using std::placeholders::_1;
 using std_msgs::msg::Float64;
 
+float clip(double n, double lower, double upper) {
+  return std::max(lower, std::min(n, upper));
+}
+
 AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
 : Node("ackermann_to_vesc_node", options)
 {
   // get conversion parameters
   speed_to_erpm_gain_ = declare_parameter("speed_to_erpm_gain").get<double>();
   speed_to_erpm_offset_ = declare_parameter("speed_to_erpm_offset").get<double>();
-  steering_to_servo_gain_ = declare_parameter("steering_angle_to_servo_gain").get<double>();
-  steering_to_servo_offset_ = declare_parameter("steering_angle_to_servo_offset").get<double>();
+
+  steering_min_angle_ = declare_parameter("steering_min_angle").get<double>();
+  steering_max_angle_ = declare_parameter("steering_max_angle").get<double>();
+  double steering_min_servo = declare_parameter("steering_min_servo").get<double>();
+  double steering_max_servo = declare_parameter("steering_max_servo").get<double>();
+  steering_center_servo_ = declare_parameter("steering_center_servo").get<double>();
+
+  min_angle_gain_ = steering_min_servo - steering_center_servo_;
+  max_angle_gain_ = steering_max_servo - steering_center_servo_;
 
   // create publishers to vesc electric-RPM (speed) and servo commands
   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
@@ -70,13 +81,26 @@ void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPt
 
   // calc steering angle (servo)
   Float64 servo_msg;
-  servo_msg.data = steering_to_servo_gain_ * cmd->drive.steering_angle + steering_to_servo_offset_;
+  
+  servo_msg.data = steering_center_servo_;
+  if(cmd->drive.steering_angle > 0){
+    double coeff = clip(cmd->drive.steering_angle / steering_max_angle_, 0.0, 1.0);
+    servo_msg.data += coeff * max_angle_gain_;
+  }
+  else if (cmd->drive.steering_angle < 0){
+    double coeff = clip(cmd->drive.steering_angle / steering_min_angle_, 0.0, 1.0);
+    servo_msg.data += coeff * min_angle_gain_;
+  }
 
   // publish
   if (rclcpp::ok()) {
     erpm_pub_->publish(erpm_msg);
     servo_pub_->publish(servo_msg);
   }
+}
+
+double AckermannToVesc::clip(double n, double lower, double upper) {
+  return std::max(lower, std::min(n, upper));
 }
 
 }  // namespace vesc_ackermann

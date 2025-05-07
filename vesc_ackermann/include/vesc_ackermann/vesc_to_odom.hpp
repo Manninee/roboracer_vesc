@@ -61,6 +61,18 @@ private:
   // conversion gain and offset
   double speed_to_erpm_gain_, speed_to_erpm_offset_;
   double steering_to_servo_gain_, steering_to_servo_offset_;
+
+  double speed_deadzone_;
+
+  // Steering parameters
+  double steering_min_angle_, steering_max_angle_;
+  double steering_min_servo_, steering_max_servo_, steering_center_servo_;
+
+  bool calculate_position_and_yaw_;
+
+  // Previous velocity values
+  double previous_x_dot_, previous_y_dot_, previous_angular_velocity_;
+
   double wheelbase_;
   bool publish_tf_;
 
@@ -78,6 +90,8 @@ private:
   // ROS callbacks
   void vescStateCallback(const VescStateStamped::SharedPtr state);
   void servoCmdCallback(const Float64::SharedPtr servo);
+
+  double clip(double n, double lower, double upper);
 };
 
 }  // namespace vesc_ackermann

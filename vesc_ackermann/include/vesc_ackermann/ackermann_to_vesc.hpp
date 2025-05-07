@@ -50,7 +50,12 @@ private:
   // ROS parameters
   // conversion gain and offset
   double speed_to_erpm_gain_, speed_to_erpm_offset_;
-  double steering_to_servo_gain_, steering_to_servo_offset_;
+
+  // Steering parameters
+  double steering_min_angle_, steering_max_angle_, steering_center_servo_;
+
+  // Calculated from ROS parameters
+  double min_angle_gain_, max_angle_gain_;
 
   /** @todo consider also providing an interpolated look-up table conversion */
 
@@ -61,6 +66,8 @@ private:
 
   // ROS callbacks
   void ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd);
+
+  double clip(double n, double lower, double upper);
 };
 
 }  // namespace vesc_ackermann
